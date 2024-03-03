@@ -1,4 +1,5 @@
 from collections import defaultdict # For inverting the script index.
+from pathlib import Path            # For OS-agnostic path operations.
 from hashlib import sha256          # For hashing script files.
 from glob import glob               # For batch file operations.
 import json                         # For storing script hashes.
@@ -28,12 +29,17 @@ if os.path.exists(ENV_CONFIG):
         for line in env_config:
             if line.startswith('NWN_INSTALL_PATH'):
                 GAME_DIR = line.split('=')[1].strip()
-                break
+            elif line.startswith('NWN_HOME_PATH'):
+                USER_DIR = line.split('=')[1].strip()
+                if '!HOMEPATH!' in USER_DIR:
+                    # Replace the !HOMEPATH! token with the user's home directory.
+                    USER_DIR = os.path.join(Path.home(), USER_DIR.split('!HOMEPATH!')[1].strip(os.sep))
 # We cannot compile scripts without locating the game directory. Exit with an error.
 else: print(f'Error: Unable to locate AREDev builder config file at "{ENV_CONFIG}"') ; exit(1)
 
 # Validate the above environment constants.
 if not os.path.exists(GAME_DIR):      print(f'Error: Unable to locate NWN installation directory at "{GAME_DIR}"') ; exit(1)
+if not os.path.exists(USER_DIR):      print(f'Error: Unable to locate NWN home directory at "{USER_DIR}"')         ; exit(1)
 if not os.path.exists(SCRIPT_DIR):    print(f'Error: Unable to locate script directory at "{SCRIPT_DIR}"')         ; exit(1)
 if not os.path.exists(COMPILER_PATH): print(f'Error: Unable to locate nwn_script_comp at "{COMPILER_PATH}"')       ; exit(1)
 if not os.path.exists(OUTPUT_DIR):    os.makedirs(OUTPUT_DIR) # No need to exit; we'll just create the directory.
@@ -237,6 +243,7 @@ class Compiler:
                            '--quiet',                             # : Turn off all logging, except errors and above
                            '--max-include-depth=64',              # : Maximum include depth [default: 16]
                            '--root', GAME_DIR,                    # : Override NWN root (autodetection is attempted)
+                           '--userdirectory', USER_DIR,           # : Override NWN user directory (autodetection is attempted)
                            '--dirs', self.script_index.directory] # : Load comma-separated directories [default: ]
         remaining = None # Stores remaining scripts to be compiled if the command line was too long.
 
