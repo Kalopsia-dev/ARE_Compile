@@ -27,6 +27,9 @@ class ScriptIndex:
         self.directory = directory
         self.scripts = dict()
 
+        # Ensure the script index parent directory exists.
+        os.makedirs(os.path.split(ScriptIndex.PATH)[0], exist_ok=True)
+
         # Parses all scripts in the script directory, genearting a script object for each.
         {Script(file, self) for file in os.listdir(self.directory)}
 
