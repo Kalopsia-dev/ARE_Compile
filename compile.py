@@ -1,5 +1,4 @@
 from collections import defaultdict # For inverting the script index.
-from pathlib import Path            # For OS-agnostic path operations.
 from hashlib import sha256          # For hashing script files.
 from glob import glob               # For batch file operations.
 import json                         # For storing script hashes.
@@ -10,42 +9,11 @@ import sys                          # For command line arguments.
 import time                         # For compile time measurement.
 import subprocess                   # For calling the compiler.
 
-# Environment constants
-WIN32           = sys.platform == 'win32'
-AREDEV_DIR      = f'{os.getcwd()}{os.sep}'
-SCRIPT_DIR      = f'{os.path.join(AREDEV_DIR, "are-resources", "scripts")}{os.sep}'
-OUTPUT_DIR      = f'{os.path.join(AREDEV_DIR, "compiled-resources")}{os.sep}'
-SERVER_DIR      = f'{os.path.join(AREDEV_DIR, "server", "development")}{os.sep}'
-SCRIPT_INDEX    = f'{os.path.join(AREDEV_DIR, "script_index.json"   if WIN32 else ".script_index.json")}'
-COMPILER_PATH   = f'{os.path.join(AREDEV_DIR, "nwn_script_comp.exe" if WIN32 else "nwn_script_comp")}'
-WIN_CMD_LIMIT   = 32768 - 768 # Windows has a command line limit of 32768 characters. We'll leave some room for the compiler.
-SCRIPT_SUFFIX   = '.nss'
-COMPILED_SUFFIX = '.ncs'
-
-# Load the game directory from the AREDev builder config file.
-ENV_CONFIG = os.path.join(AREDEV_DIR, 'config', 'builder.conf')
-if os.path.exists(ENV_CONFIG):
-    with open(ENV_CONFIG) as env_config:
-        for line in env_config:
-            if line.startswith('NWN_INSTALL_PATH'):
-                GAME_DIR = line.split('=')[1].strip()
-            elif line.startswith('NWN_HOME_PATH'):
-                USER_DIR = line.split('=')[1].strip()
-                if '!HOMEPATH!' in USER_DIR:
-                    # Replace the !HOMEPATH! token with the user's home directory.
-                    USER_DIR = os.path.join(Path.home(), USER_DIR.split('!HOMEPATH!')[1].strip(os.sep))
-# We cannot compile scripts without locating the game directory. Exit with an error.
-else: print(f'Error: Unable to locate AREDev builder config file at "{ENV_CONFIG}"') ; exit(1)
-
-# Validate the above environment constants.
-if not os.path.exists(GAME_DIR):      print(f'Error: Unable to locate NWN installation directory at "{GAME_DIR}"') ; exit(1)
-if not os.path.exists(USER_DIR):      print(f'Error: Unable to locate NWN home directory at "{USER_DIR}"')         ; exit(1)
-if not os.path.exists(SCRIPT_DIR):    print(f'Error: Unable to locate script directory at "{SCRIPT_DIR}"')         ; exit(1)
-if not os.path.exists(COMPILER_PATH): print(f'Error: Unable to locate nwn_script_comp at "{COMPILER_PATH}"')       ; exit(1)
-if not os.path.exists(OUTPUT_DIR):    os.makedirs(OUTPUT_DIR) # No need to exit; we'll just create the directory.
-
 class ScriptIndex:
     '''An index that stores references to unique Script objects and resolves their dependencies.'''
+
+    # Default location for the script index file.
+    PATH = os.path.join(os.path.split(__file__)[0], 'tmp', 'script_index.json')
 
     # Regular expressions for parsing script files.
     regex_comments = re.compile(r'/\*([\s\S]*?)?\*/',                       re.MULTILINE)
@@ -131,7 +99,7 @@ class ScriptIndex:
         '''Loads the index of script hashes and returns them as a dictionary.
            The keys are script file names without extensions, the values are file hashes.'''
         try:
-            with open(SCRIPT_INDEX, 'r') as hashes:
+            with open(ScriptIndex.PATH, 'r') as hashes:
                 return json.load(hashes)
         except: return dict()
 
@@ -139,31 +107,35 @@ class ScriptIndex:
     def write_hash_index(script_hashes : dict) -> None:
         '''Writes the given index of script hashes to a default location.'''
         try:
-            with open(os.path.expanduser(SCRIPT_INDEX), 'w') as outfile:
+            with open(os.path.expanduser(ScriptIndex.PATH), 'w') as outfile:
                 outfile.write(json.dumps(script_hashes))
         except Exception as e:
             print(f'Error: Unable to store script hashes ({e})')
 
     def delete_hash_index() -> dict:
         '''Deletes the index of script hashes.'''
-        try: os.remove(SCRIPT_INDEX)
+        try: os.remove(ScriptIndex.PATH)
         except: return
 
 class Script:
     '''A data class for script files that stores an individual script's name, path, hash, and include relations.'''
 
-    # Initialise class variables.
-    is_include : bool = False
-    has_main   : bool = False
-    includes   : set  = set()
-    hash       : int  = 0
+    # File suffixes for script files.
+    NSS = '.nss' # Source script file.
+    NCS = '.ncs' # Compiled script file.
 
     def __init__(self, name: str, script_index: ScriptIndex):
         '''Initialises a script object and its children Scripts using a file name.'''
         # Initialise the script name and path, then check if the file exists.
         self.name   = Script.normalise_script_name(name)
-        self.path   = script_index.directory + self.name + SCRIPT_SUFFIX
+        self.path   = os.path.join(script_index.directory, f'{self.name}{Script.NSS}')
         self.exists = os.path.isfile(self.path)
+
+        # Initialise class variables.
+        self.is_include : bool = False
+        self.has_main   : bool = False
+        self.includes   : set  = set()
+        self.hash       : int  = 0
 
         # Add this script to the script index if it's not included yet.
         if self.name not in script_index.scripts:
@@ -201,25 +173,33 @@ class Script:
 class Compiler:
     '''A compiler that intelligently compiles scripts based on their include relations and hash changes.'''
 
-    def __init__(self, params: list):
+    def __init__(self, params: list, compiler : str, script_dir: str, output_dir: str, nwn_install_dir : str = '', nwn_user_dir : str = '', *, secondary_output_dir = None):
         '''Initialises a compiler object using a script index.'''
-        # Store the current time to calculate the total execution time later.
-        self.output_dir = OUTPUT_DIR
-        self.start_time = time.time()
-        live_compile = '--live' in params
+        # Check whether the provided paths exist. If output directories are missing, create them.
+        if not os.path.exists(script_dir):                          print(f'Error: Unable to locate script directory at "{script_dir}"')      ; exit(1)
+        if nwn_user_dir and not os.path.exists(nwn_user_dir):       print(f'Error: Unable to locate NWN home directory at "{nwn_user_dir}"')  ; exit(1)
+        if nwn_install_dir and not os.path.exists(nwn_install_dir): print(f'Error: Unable to locate NWN installation at "{nwn_install_dir}"') ; exit(1)
+        if secondary_output_dir and not os.path.exists(secondary_output_dir): os.makedirs(secondary_output_dir)
+        if not os.path.exists(output_dir): os.makedirs(output_dir)
 
-        # If we're live compiling, the compiler will copy compiled scripts to the server's development folder.
-        if live_compile: params.remove('--live')
+        # Store the current time to calculate the total execution time later.
+        self.start_time = time.time()
+
+        # Store the given parameters and directories.
+        self.nwn_install_dir = nwn_install_dir
+        self.nwn_user_dir = nwn_user_dir
+        self.output_dir = output_dir
+        self.compiler = compiler
 
         # Compile all scripts if the output directory is empty or there is no hash index.
-        output_files  = len(glob(f'{self.output_dir}*{COMPILED_SUFFIX}'))
+        output_files  = len(glob(os.path.join(self.output_dir, f'*{Script.NCS}')))
         script_hashes = ScriptIndex.read_hash_index()
         if params != ['all'] and not (output_files and script_hashes):
             print('All scripts will be compiled to initialise the index.', end='\n\n')
             params = ['all']
 
         # Generate a script index to analyse the include structure.
-        self.script_index = ScriptIndex(SCRIPT_DIR)
+        self.script_index = ScriptIndex(script_dir)
 
         # Determine the compile mode based on the given parameters and availability of a hash index.
         if params:
@@ -230,28 +210,32 @@ class Compiler:
             else:                  self.compile_script(param)
         else: self.compile_modified()
 
-        if live_compile:
+        if secondary_output_dir:
             # If we're live compiling, copy scripts compiled since start_time to the server's development folder.
             for script in os.listdir(self.output_dir):
-                if os.path.getmtime(self.output_dir + script) > self.start_time:
-                    shutil.copyfile(self.output_dir + script, SERVER_DIR + script)
+                if os.path.getmtime(os.path.join(self.output_dir, script)) > self.start_time:
+                    shutil.copyfile(os.path.join(self.output_dir, script), os.path.join(secondary_output_dir, script))
 
     def run_script_comp(self, path: str, *, silent = False) -> bool:
         '''Runs nwn_script_comp on a given script file or wildcard path. Returns True if the operation was successful.'''
-        compile_command = [COMPILER_PATH,                         # Prepare nwn_script_comp calls. The flags are as follows:
-                           '-c',                                  # : Compile multiple files and/or directories.
-                           '--quiet',                             # : Turn off all logging, except errors and above
-                           '--max-include-depth=64',              # : Maximum include depth [default: 16]
-                           '--root', GAME_DIR,                    # : Override NWN root (autodetection is attempted)
-                           '--userdirectory', USER_DIR,           # : Override NWN user directory (autodetection is attempted)
-                           '--dirs', self.script_index.directory] # : Load comma-separated directories [default: ]
+        compile_command = [self.compiler,                                  # Prepare nwn_script_comp calls. The flags are as follows:
+                           '-c',                                           # : Compile multiple files and/or directories.
+                           '--quiet',                                      # : Turn off all logging, except errors and above
+                           '--max-include-depth=64',                       # : Maximum include depth [default: 16]
+                           '--dirs', self.script_index.directory]          # : Load comma-separated directories [default: ]
+        if self.nwn_install_dir: # Allow overriding the default NWN directories.
+            compile_command.extend(['--root', self.nwn_install_dir])       # : Override NWN root (autodetection is attempted)
+        if self.nwn_user_dir:
+            compile_command.extend(['--userdirectory', self.nwn_user_dir]) # : Override NWN user directory (autodetection is attempted)
         remaining = None # Stores remaining scripts to be compiled if the command line was too long.
 
         # Check if the path is a list of paths, a directory, or a file.
         if isinstance(path, list):
             # If it is a list of paths, we're compiling multiple files within the same directory.
             if not silent: print('Compiling...', end='\n\n')
-            if not WIN32 or len(" ".join(compile_command + path)) < WIN_CMD_LIMIT:
+            # Windows has a command line limit of 32768 characters. If we exceed this, we'll need to compile in batches.
+            WIN_CMD_LIMIT = 32768 - 768 if sys.platform == 'win32' else 0
+            if not WIN_CMD_LIMIT or len(' '.join(compile_command + path)) < WIN_CMD_LIMIT:
                 # This is a UNIX system or the command line is short enough. We can compile all files at once.
                 compile_command.extend(path)
             else:
@@ -261,21 +245,21 @@ class Compiler:
                     compile_command.append(path.pop(0))
                 # Store the remaining script list for later.
                 remaining = path.copy()
-            path = f'{os.path.dirname(path[0])}{os.sep}'
+            path = os.path.dirname(path[0])
             isdir = True
         else:
             # Otherwise, we're compiling a single file or directory.
             isdir = os.path.isdir(path)
             if isdir:
                 # We're compiling all scripts within the given directory.
-                compile_command.append(path[:-1])
+                compile_command.append(path)
                 if not silent: print('Compiling...', end='\n\n')
             else:
                 # We're compiling a single script file. Only append the given file name.
                 compile_command.remove('-c')
                 compile_command.append(f'{path}')
                 file_name = os.path.splitext(os.path.basename(path))[0]
-                if not silent: print(f'Compiling: {file_name}{SCRIPT_SUFFIX}', end='\n\n')
+                if not silent: print(f'Compiling: {file_name}{Script.NSS}', end='\n\n')
 
         # Run nwn_script_comp on the given path and analyse the output.
         with subprocess.Popen(compile_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as compile_process:
@@ -302,11 +286,12 @@ class Compiler:
         if isdir:
             # Move the generated .ncs files to our output folder.
             print('Moving script(s) to output folder...')
-            [shutil.move(file, self.output_dir + os.path.basename(file)) for file in glob(f'{path}*{COMPILED_SUFFIX}')]
+            all(shutil.move(file, os.path.join(self.output_dir, os.path.basename(file)))
+                for file in glob(os.path.join(path, f'*{Script.NCS}')))
             print('Success!', end='\n\n')
         else:
             # Move the generated .ncs file to our output folder. We'll need to replace the extension.
-            shutil.move(f'{path[:-4]}{COMPILED_SUFFIX}', f'{self.output_dir}{file_name}{COMPILED_SUFFIX}')
+            shutil.move(f'{path[:-4]}{Script.NCS}', os.path.join(self.output_dir, f'{file_name}{Script.NCS}'))
         print(f'Total Execution time = {time.time() - self.start_time:.4f} seconds', end='\n\n')
         return True
 
@@ -344,7 +329,7 @@ class Compiler:
                     print(f'{len(to_compile)} script(s) include {script.name}.', end='\n\n')
                     self.compile_set(to_compile, script)
                 else: print(f'No scripts include {script.name}.')
-        else: print(f'Error: Unable to find {script_name}{SCRIPT_SUFFIX}')
+        else: print(f'Error: Unable to find {script_name}{Script.NSS}')
 
     def compile_all(self) -> None:
         '''Compiles all scripts in the main script directory and copies the results to the output directory.'''
@@ -395,7 +380,7 @@ class Compiler:
             # Print a list of all matches, then compile the affected scripts.
             if len(matches) < 30:
                 print(f'\n{len(matches)} match(es) found:')
-                [print(f'- {script_name}{SCRIPT_SUFFIX}')
+                [print(f'- {script_name}{Script.NSS}')
                  for script_name in sorted([script.name for script in matches])]
             else: print(f'\n{len(matches)} match(es) found.')
             print(f'\n{len(to_compile)} related script(s) will be compiled.', end='\n\n')
@@ -405,7 +390,19 @@ class Compiler:
     @staticmethod
     def __clean_directory__(directory: str) -> None:
         '''Removes all compiled script files from a given directory.'''
-        [os.remove(file) for file in glob(f'{directory}*{COMPILED_SUFFIX}')]
+        all(not os.remove(file) for file in glob(os.path.join(directory, f'*{Script.NCS}')))
 
-# Create a script index and compile scripts based on the given parameters.
-Compiler(sys.argv[1:])
+if __name__ == '__main__':
+    # Create a script index and compile based on the given command-line parameters. We'll look for nwn_script_comp in the same directory.
+    compiler_path = os.path.join(os.path.split(__file__)[0], 'nwn_script_comp.exe' if sys.platform == 'win32' else 'nwn_script_comp')
+    if not os.path.exists(compiler_path):
+        # If the compiler is not found, we cannot proceed. Exit with an error.
+        print(f'Error: Unable to locate nwn_script_comp at "{compiler_path}"')
+        exit(1)
+
+    Compiler(
+        script_dir=os.path.join(os.getcwd(), 'scripts'),
+        output_dir=os.path.join(os.getcwd(), 'compiled-scripts'),
+        compiler=compiler_path,
+        params=sys.argv[1:],
+    )
