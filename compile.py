@@ -182,8 +182,8 @@ class Compiler:
         if not os.path.exists(script_dir):                          print(f'Error: Unable to locate script directory at "{script_dir}"')      ; exit(1)
         if nwn_user_dir and not os.path.exists(nwn_user_dir):       print(f'Error: Unable to locate NWN home directory at "{nwn_user_dir}"')  ; exit(1)
         if nwn_install_dir and not os.path.exists(nwn_install_dir): print(f'Error: Unable to locate NWN installation at "{nwn_install_dir}"') ; exit(1)
-        if secondary_output_dir and not os.path.exists(secondary_output_dir): os.makedirs(secondary_output_dir)
-        if not os.path.exists(output_dir): os.makedirs(output_dir)
+        if secondary_output_dir: os.makedirs(secondary_output_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
 
         # Store the current time to calculate the total execution time later.
         self.start_time = time.time()
