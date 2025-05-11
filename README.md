@@ -1,17 +1,18 @@
 # ARE_Compile
-A Python-based wrapper for [nwn_script_comp](https://github.com/niv/neverwinter.nim), used in development workflows on the [Arelith persistent role playing server](https://nwnarelith.com).
+Compiler extensions used in development workflows on the [Arelith persistent role playing server](https://nwnarelith.com).
 
 ### Main Features
-- Parses all NWScript (.nss) files in the provided `script_dir` and analyses their include file hierarchy.
-- Keeps track of scripts that `nwn_script_comp` successfully compiled. Stores this information in a `script_index.json` file with persistent file hashes.
-- Uses the above information to map modified files to all their dependencies and intelligently compile only these affected files, rather than the entire code base.
-- Successfully compiled script files are moved to the given `output_dir`.
-  - A `secondary_output_dir` can be configured, if needed. This is useful for live testing code changes on a running NWN server instance, if set to the server’s `development` folder.
+- Parse all NWScript (.nss) files in the provided `script_dir` and analyses their include file hierarchy.
+- Keep track of scripts that `nwn_script_comp` successfully compiled. Stores this information in a `script_index.json` file with persistent file hashes.
+- Use the above information to map modified files to all their dependencies and intelligently compile only these affected files, rather than the entire code base.
+  - Runs on all CPU cores, just like the native [nwn_script_comp](https://github.com/niv/neverwinter.nim) binary.
+  - Successfully compiled script files are moved to the given `output_dir`.
+    - A `secondary_output_dir` can be configured, if needed. This is useful for live testing code changes on a running NWN server instance, if set to the server’s `development` folder.
 
 ### Environment Setup
 - By default, ARE_Compile looks for a `nwn_script_comp` binary in the same folder as this Python script.
 - The default input directory is called `scripts` and should be in the same folder - just like `compiled-scripts`, the output directory.
-- If `nwn_script_comp`’s built-in autodetection of NWN root and user directory is unreliable, specific folders can be selected via the `nwn_install_dir` and `nwn_user_dir` parameters of the Compiler class.
+- Presently, there is no built-in autodetection of the NWN install directory, so `compile.py` must be updated to pass a valid `nwn_install_dir` to the `Compiler` object on creation.
 
 ### Usage
 | Command                            | Function                                                                                                                   |
@@ -22,5 +23,6 @@ A Python-based wrapper for [nwn_script_comp](https://github.com/niv/neverwinter.
 | `compile.py all` or `compile.py *` | Compile all scripts in the script directory. Required to initialise `script_index.json`.                                   |
 
 ### Requirements
-- ARE_Compile is compatible with Python version 3.11 or newer. No additional Python dependencies are required.
-- Uses version [1.7.0](https://github.com/niv/neverwinter.nim/releases/tag/1.7.0) or newer of `nwn_script_comp` to compile scripts.
+- ARE_Compile is compatible with Python version 3.12 or newer.
+- Requires the [`nwn`](https://pypi.org/project/nwn/) Python package to read game files and compile scripts.
+  - ARE_Compile has been developed with version `0.0.12`. Installing this version is recommended, as nwn` is presently in ALPHA state, so its API may change in later versions.
