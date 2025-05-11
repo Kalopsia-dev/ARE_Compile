@@ -23,6 +23,6 @@ Compiler extensions used in development workflows on the [Arelith persistent rol
 | `compile.py all` or `compile.py *` | Compile all scripts in the script directory. Required to initialise `script_index.json`.                                   |
 
 ### Requirements
-- ARE_Compile is compatible with Python version 3.12 or newer.
+- ARE_Compile is known to be compatible with Python version 3.12 or newer. Earlier versions may or may not work as expected.
 - Requires the [`nwn`](https://pypi.org/project/nwn/) Python package to read game files and compile scripts.
-  - ARE_Compile has been developed with version `0.0.12`. Installing this version is recommended, as nwn` is presently in ALPHA state, so its API may change in later versions.
+  - ARE_Compile has been developed with version `0.0.12`. Installing this version is recommended, as `nwn.py` is still in early development, so its API may change.
