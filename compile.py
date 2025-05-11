@@ -5,7 +5,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from glob import glob
 from hashlib import sha256
@@ -414,11 +414,10 @@ class Compiler:
             scripts = {scripts}
 
         # Prepare the thread pool executor for parallel compilation.
-        executor = ThreadPoolExecutor(max_workers=min(self.num_workers, len(scripts)))
         thread_data = threading.local()
         cancelled = False
 
-        def thread_compiler() -> ScriptComp:
+        def compiler() -> ScriptComp:
             """
             Returns a thread-local `ScriptComp` instance.
             """
@@ -431,7 +430,7 @@ class Compiler:
                 )
             return thread_data.compiler
 
-        def compile_threaded(script: Script) -> Tuple[str, bytes]:
+        def compile_in_thread(script: Script) -> Tuple[str, bytes | None]:
             """
             Compiles a script in a separate thread and returns the result.
 
@@ -444,29 +443,35 @@ class Compiler:
                 CompilationError: If the compilation fails.
             """
             print(f"Compiling: {script.name}{Script.NSS}")
-            ncs_bytes, _ = thread_compiler().compile(script.name)
+            try:
+                # Attempt to compile the script using the thread-local compiler instance.
+                ncs_bytes = compiler().compile(script.name)[0]
+            except CompilationError as error:
+                # Convert compile errors into the desired output format.
+                error_msg = error.message.splitlines()[0].split(" [")[0]
+                if error_msg.endswith("ERROR: NO FUNCTION MAIN IN SCRIPT"):
+                    # Trying to compile an include file is fine, no need to raise.
+                    return f"{script.name}{Script.NCS}", None
+                # File not found errors already get displayed by load_script_contents.
+                if not error_msg.endswith("ERROR: FILE NOT FOUND"):
+                    # All other errors are printed.
+                    print(f"\n{error_msg}")
+                raise error
             return f"{script.name}{Script.NCS}", ncs_bytes
 
-        # Asynchronously compile all scripts in the given set.
-        compiled = {}
         try:
-            for future in as_completed(
-                executor.submit(compile_threaded, script=script)
-                for script in sorted(scripts, key=lambda script: script.name)
-            ):
-                try:
-                    # Collect the results in a dictionary.
-                    ncs_name, ncs = future.result()
-                    compiled[ncs_name] = ncs
-                except CompilationError as e:
-                    # Handle compile errors.
-                    error_msg = e.message.splitlines()[0].split(" [")[0]
-                    if error_msg.endswith("ERROR: NO FUNCTION MAIN IN SCRIPT"):
-                        # Trying to compile an include file is fine, we can continue.
-                        continue
-                    if not error_msg.endswith("ERROR: FILE NOT FOUND"):
-                        print(f"\n{error_msg}")
-                    raise e
+            # Asynchronously compile all scripts in the given set.
+            # We can use threads because ScriptComp is not subject to the GIL.
+            with ThreadPoolExecutor(
+                max_workers=min(self.num_workers, len(scripts))
+            ) as executor:
+                compiled = executor.map(
+                    compile_in_thread, sorted(scripts, key=lambda s: s.name)
+                )
+                # Unpack the results.
+                compiled = {
+                    ncs_name: ncs for ncs_name, ncs in compiled if ncs is not None
+                }
         except CompilationError:
             # Compilation errors should stop all threads.
             print(
@@ -519,17 +524,18 @@ class Compiler:
             if script.contents:
                 # If yes, directly return its contents.
                 return script.contents
-        # If the script is nwscript.nss, load it directly from the NWN installation directory.
+        # If not, we might find it in the NWN installation directory.
+        # First, check the overrides, which take precedence over key files.
         script_name += Script.NSS
         override = os.path.join(self.nwn_install_dir, "ovr", script_name)
         if os.path.isfile(override):
             with open(override, "rb") as file:
                 return file.read()
         try:
-            # Attempt to load the script from the NWN key file.
+            # If it's not here, attempt to load it from the NWN key file.
             return self.key_reader.read_file(script_name)
         except FileNotFoundError:
-            # If the file is not included, we have no options left. Print an error message and return None.
+            # We have no options left. Print an error message and return None.
             print(f"\n{script_name}: ERROR: FILE NOT FOUND")
             return None
 
@@ -703,6 +709,6 @@ if __name__ == "__main__":
     Compiler(
         script_dir=os.path.join(os.getcwd(), "scripts"),
         output_dir=os.path.join(os.getcwd(), "compiled-scripts"),
-        nwn_install_dir=None, # TODO: Add your NWN install directory here!
+        nwn_install_dir=None,  # TODO: Add your NWN install directory here!
         params=sys.argv[1:],
     )
