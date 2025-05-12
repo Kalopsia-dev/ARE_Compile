@@ -1,15 +1,12 @@
 import json
 import os
 import re
-import sys
 import threading
 import time
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from glob import glob
 from hashlib import sha256
-from typing import Dict, Iterable, Set, Tuple
 
 from nwn.key import Reader as KeyReader
 from nwn.nwscript.comp import CompilationError
@@ -45,7 +42,10 @@ class ScriptIndex:
         os.makedirs(os.path.split(ScriptIndex.PATH)[0], exist_ok=True)
 
         # Parse all scripts in the script directory, generating a script object for each.
-        {Script(file, self) for file in os.listdir(self.directory)}
+        {
+            Script(script_name, script_index=self)
+            for script_name in glob(os.path.join(directory, f"*{Script.NSS}"))
+        }
 
         # Flattens all includes in the scripts storage, mapping each script to its dependencies.
         self.scripts = ScriptIndex.flatten_includes(self.scripts)
@@ -53,14 +53,12 @@ class ScriptIndex:
         # Inverts the script index so that each include file points to its children.
         self.includes = ScriptIndex.invert_index(self.scripts)
 
-    def get_modified_scripts(self) -> Set["Script"]:
+    def get_modified_scripts(self) -> set["Script"]:
         """
         Finds all scripts that have been modified since the last compile.
 
         Returns:
-            Set[Script]: A set of all modified scripts.
-        Raises:
-            FileNotFoundError: If the hash index file does not exist.
+            set[Script]: A set of all modified scripts.
         """
         script_hashes = ScriptIndex.read_hash_index()
         return {
@@ -74,81 +72,84 @@ class ScriptIndex:
         }
 
     @staticmethod
-    def flatten_includes(
-        index: Dict[str, "Script"],
-        prior: Dict[str, "Script"] | None = None,
-        *,
-        depth: int = 0,
-    ) -> Dict[str, "Script"]:
+    def flatten_includes(index: dict[str, "Script"]) -> dict[str, "Script"]:
         """
-        Recursion that flattens the include file hierarchy up to the maximum include file depth.
+        Recursion that flattens the include file hierarchy, mapping each script to all its dependencies.
 
         Args:
-            index (Dict[str, Script]): The script index to flatten. Maps normalised script names to Script.
-            prior (Dict[str, Script] | None): The previous state of the index. Used to detect changes.
-            depth (int): The current recursion depth. Limited to 10 to prevent infinite loops in case of circular dependencies.
+            index (dict[str, Script]): The script index to flatten.
 
         Returns:
-            Dict[str, Script]: The flattened script index. Maps normalised script names to Script.
+            dict[str, Script]: The flattened script index. Maps normalised script names to Script.
         """
-        # Combine every entry in the script index with its corresponding include's includes.
-        if depth < 10:
-            [
+
+        def count_includes(index: dict[str, "Script"]) -> dict[str, int]:
+            """
+            Returns a dictionary of include counts for each script in the index.
+            """
+            return {
+                script.name: len(script.includes)
+                for script in index.values()
+                if script.includes
+            }
+
+        last_count = None
+        for _ in range(10):
+            if last_count == (current_count := count_includes(index)):
+                # If the include count hasn't changed since the last iteration, we can stop.
+                break
+            # Combine every entry in the script index with its corresponding include's includes.
+            any(
                 script.includes.update(include.includes)
                 for script in index.values()
                 for include in set(script.includes)
-            ]
-            # Keep doing this until nothing changes.
-            if index == prior:
-                return index
-            else:
-                return ScriptIndex.flatten_includes(
-                    index, prior=index.copy(), depth=depth + 1
+                if script.includes
+                and (
+                    last_count is None  # First iteration.
+                    or (last_count[script.name] != current_count[script.name])
                 )
-        else:
-            print(
-                "Warning: Maximum include depth exceeded. Check for circular dependencies!"
             )
-            return index
+            # Update the stored include count for the next iteration.
+            last_count = current_count
+        return index
 
     @staticmethod
-    def invert_index(index: Dict[str, "Script"]) -> Dict["Script", Set["Script"]]:
+    def invert_index(index: dict[str, "Script"]) -> dict["Script", set["Script"]]:
         """
-        Returns an inverted script index where include file point at their children files.
+        Returns an inverted script index where include files point at their children.
 
         Args:
-            index (Dict[str, Script]): The script index to invert. Maps normalised script names to Script.
+            index (dict[str, Script]): The script index to invert. Maps normalised script names to Script objects.
 
         Returns:
-            Dict[Script, Set[Script]]: The inverted script index. Maps include files to their child scripts.
+            dict[Script, set[Script]]: The inverted script index. Maps include files to their child scripts.
         """
-        inverted = defaultdict(set)
-        [
-            inverted[include].add(script)
-            for script in index.values()
-            for include in script.includes
-        ]
+        # Prepare a dictionary to store the inverted script index.
+        includes = dict.fromkeys(
+            {include for script in index.values() for include in script.includes},
+        )
+        # Add all scripts to the corresponding include keys.
+        for script in index.values():
+            for include in script.includes:
+                # If we haven't seen this include file before, create a new set for it.
+                if not include.is_include:
+                    include.is_include = True
+                    includes[include] = {script}
+                else:
+                    includes[include].add(script)
+                # If an include file has a main function, its children inherit it.
+                if include.has_main:
+                    script.has_main = True
+        return includes
 
-        # Validate the inverted index: if an include file has a main function, its children are also considered to have one.
-        for include, scripts in dict(inverted).items():
-            if include.has_main:
-                if include in inverted:
-                    del inverted[include]
-                for script in scripts:
-                    if not script.has_main:
-                        script.has_main = True
-            else:
-                include.is_include = True
-        return inverted
-
-    def generate_hash_index(self) -> Dict[str, int]:
+    def generate_hash_index(self) -> dict[str, int]:
         """
         Returns a dictionary index of script hashes.
 
         This is used to check if a script has been modified since the last compile.
 
         Returns:
-            Dict[str, int]: The index of script hashes. Maps script file names to their hashes.
+            dict[str, int]: The index of script hashes. Maps script file names to their hashes.
         """
         # Generate a hash index of all scripts in the script index.
         hashes = {
@@ -159,17 +160,15 @@ class ScriptIndex:
         return hashes
 
     @staticmethod
-    def update_hash_index(modified: Set["Script"]) -> Dict[str, int]:
+    def update_hash_index(modified: set["Script"]) -> dict[str, int]:
         """
         Updates the index of script hashes with the given set of modified scripts.
 
         Args:
-            modified (Set[Script]): The set of modified scripts to update the index with.
+            modified (set[Script]): The set of modified scripts to update the index with.
 
         Returns:
-            Dict[str, int]: The updated index of script hashes. Maps script file names to their hashes.
-        Raises:
-            FileNotFoundError: If the hash index file does not exist.
+            dict[str, int]: The updated index of script hashes. Maps script file names to their hashes.
         """
         hashes = ScriptIndex.read_hash_index()
         hashes.update(
@@ -178,28 +177,26 @@ class ScriptIndex:
         return hashes
 
     @staticmethod
-    def read_hash_index() -> Dict[str, int]:
+    def read_hash_index() -> dict[str, int]:
         """
         Loads the index of script hashes and returns them as a dictionary.
 
         Returns:
-            Dict[str, int]: The index of script hashes. Maps script file names to their hashes.
-        Raises:
-            FileNotFoundError: If the hash index file does not exist.
+            dict[str, int]: The index of script hashes. Maps script file names to their hashes.
         """
-        try:
+        if os.path.exists(ScriptIndex.PATH):
             with open(ScriptIndex.PATH, "r") as hashes:
                 return json.load(hashes)
-        except FileNotFoundError:
+        else:
             return dict()
 
     @staticmethod
-    def write_hash_index(script_hashes: Dict[str, int]) -> None:
+    def write_hash_index(script_hashes: dict[str, int]) -> None:
         """
         Writes the given index of script hashes to a default location.
 
         Args:
-            script_hashes (Dict[str, int]): The index of script hashes to write.
+            script_hashes (dict[str, int]): The index of script hashes to write.
         """
         try:
             with open(os.path.expanduser(ScriptIndex.PATH), "w") as outfile:
@@ -209,12 +206,10 @@ class ScriptIndex:
 
     def delete_hash_index() -> None:
         """
-        Deletes the index of script hashes.
+        Deletes the index of script hashes, if it exists.
         """
-        try:
+        if os.path.exists(ScriptIndex.PATH):
             os.remove(ScriptIndex.PATH)
-        except OSError as e:
-            print(f"Error: Unable to delete script hashes ({e})")
 
 
 class Script:
@@ -294,6 +289,8 @@ class Script:
         Returns:
             bool: True if the scripts are equal, False otherwise.
         """
+        if self is other:
+            return True
         if not isinstance(other, Script):
             return False
         return self.hash == other.hash and self.path == other.path
@@ -315,7 +312,7 @@ class Script:
         Returns:
             str: The normalised script name.
         """
-        # Remove the file extension and convert to lowercase.
+        script_name = os.path.basename(script_name)
         return os.path.splitext(script_name)[0].lower()
 
 
@@ -370,7 +367,7 @@ class Compiler:
             self.output_dirs.append(secondary_output_dir)
 
         # Determine the number of workers to use for compilation.
-        self.num_workers = num_workers if num_workers != -1 else os.cpu_count() or 1
+        self.num_workers = num_workers if num_workers > 0 else max(os.cpu_count(), 1)
 
         # Compile all scripts if the output directory is empty or there is no hash index.
         output_files = len(glob(os.path.join(output_dir, f"*{Script.NCS}")))
@@ -399,12 +396,17 @@ class Compiler:
             # Fallback to the default behaviour: compile all modified scripts.
             self.compile_modified()
 
-    def compile(self, scripts: Script | Iterable[Script]) -> bool:
+    def compile(
+        self,
+        scripts: Script | set[Script],
+        new_script_hashes: dict[str, int] = None,
+    ) -> None:
         """
         Compiles a given script file or iterable of scripts, then writes the results to the output directory.
 
         Args:
             scripts (Script | Iterable[Script]): The script or iterable of scripts to compile.
+            new_script_hashes (dict[str, int], optional): The new hashes to store if compilation is successful.
 
         Returns:
             bool: True if the compilation of all scripts was successful, False otherwise.
@@ -414,23 +416,19 @@ class Compiler:
             scripts = {scripts}
 
         # Prepare the thread pool executor for parallel compilation.
-        thread_data = threading.local()
-        cancelled = False
+        locals = threading.local()
 
-        def compiler() -> ScriptComp:
+        def init_thread() -> None:
             """
-            Returns a thread-local `ScriptComp` instance.
+            Initialises a thread-local compiler instance.
             """
-            if not hasattr(thread_data, "compiler"):
-                # single shared KeyReader is fine, load_script_contents is thread-safe
-                thread_data.compiler = ScriptComp(
-                    resolver=self.load_script_contents,
-                    debug_info=False,
-                    max_include_depth=64,
-                )
-            return thread_data.compiler
+            locals.compiler = ScriptComp(
+                resolver=self.load_script_contents,
+                debug_info=False,
+                max_include_depth=64,
+            )
 
-        def compile_in_thread(script: Script) -> Tuple[str, bytes | None]:
+        def compile_in_thread(script: Script) -> tuple[str | None, bytes | None]:
             """
             Compiles a script in a separate thread and returns the result.
 
@@ -438,60 +436,57 @@ class Compiler:
                 script (Script): The script to compile.
 
             Returns:
-                Tuple[str, bytes]: The name of the compiled script and its binary contents.
+                tuple[str | None, bytes | None]: The name of the compiled script and its binary, if successful.
             Raises:
                 CompilationError: If the compilation fails.
             """
             print(f"Compiling: {script.name}{Script.NSS}")
             try:
                 # Attempt to compile the script using the thread-local compiler instance.
-                ncs_bytes = compiler().compile(script.name)[0]
+                ncs_bytes = locals.compiler.compile(script.name)[0]
+                return f"{script.name}{Script.NCS}", ncs_bytes
             except CompilationError as error:
-                # Convert compile errors into the desired output format.
-                error_msg = error.message.splitlines()[0].split(" [")[0]
-                if error_msg.endswith("ERROR: NO FUNCTION MAIN IN SCRIPT"):
-                    # Trying to compile an include file is fine, no need to raise.
-                    return f"{script.name}{Script.NCS}", None
-                # File not found errors already get displayed by load_script_contents.
-                if not error_msg.endswith("ERROR: FILE NOT FOUND"):
-                    # All other errors are printed.
-                    print(f"\n{error_msg}")
+                # Format, print and raise the error. It will then interrupt the thread pool.
+                print(f"\n{error.message.splitlines()[0].split(' [')[0]}")
                 raise error
-            return f"{script.name}{Script.NCS}", ncs_bytes
 
         try:
-            # Asynchronously compile all scripts in the given set.
-            # We can use threads because ScriptComp is not subject to the GIL.
+            # We will use threads because ScriptComp is not subject to the GIL.
             with ThreadPoolExecutor(
-                max_workers=min(self.num_workers, len(scripts))
+                initializer=init_thread,
+                max_workers=min(self.num_workers, len(scripts)),
             ) as executor:
-                compiled = executor.map(
-                    compile_in_thread, sorted(scripts, key=lambda s: s.name)
-                )
-                # Unpack the results.
+                # Asynchronously compile all scripts in the given set.
                 compiled = {
-                    ncs_name: ncs for ncs_name, ncs in compiled if ncs is not None
+                    ncs_name: ncs_bytes
+                    for ncs_name, ncs_bytes in executor.map(
+                        compile_in_thread,
+                        sorted(scripts, key=lambda script: script.name),
+                    )
+                    if ncs_bytes is not None
                 }
+            successful = True
         except CompilationError:
             # Compilation errors should stop all threads.
             print(
                 "\nStopping processing on first error.\n\n1 error; see above for context.",
                 end="\n\n",
             )
-            cancelled = True
+            successful = False
         except KeyboardInterrupt:
             # Gracefully handle keyboard interrupts.
             print("\nStopping processing on user request.", end="\n\n")
-            cancelled = True
+            successful = False
         except Exception as e:
             # Handle all other exceptions.
             print(e.with_traceback())
-            cancelled = True
+            successful = False
         finally:
-            if cancelled:
+            if not successful:
+                # If anything went wrong, cancel all remaining tasks immediately.
                 executor.shutdown(wait=False, cancel_futures=True)
                 print("Processing aborted.", end="\n\n")
-                return False
+                return
 
         # If we got here, all scripts compiled successfully. Copy their binaries to the output dirs.
         print("\nWriting script(s) to output folder...")
@@ -500,11 +495,13 @@ class Compiler:
                 # Write the compiled script to the output directory.
                 with open(os.path.join(output_dir, ncs_name), "wb") as outfile:
                     outfile.write(ncs)
-        print(
-            f"Success!\n\nTotal Execution time = {time.time() - self.start_time:.4f} seconds",
-            end="\n\n",
-        )
-        return True
+        if new_script_hashes:
+            # If we have a new hash index, write it to the hash file now.
+            ScriptIndex.write_hash_index(new_script_hashes)
+
+        # Finally, print the total execution time.
+        compile_time = time.time() - self.start_time
+        print(f"Success!\n\nTotal Execution time = {compile_time:.4f} seconds\n")
 
     @lru_cache(maxsize=None)
     def load_script_contents(self, script_name: str) -> bytes | None:
@@ -535,19 +532,18 @@ class Compiler:
             # If it's not here, attempt to load it from the NWN key file.
             return self.key_reader.read_file(script_name)
         except FileNotFoundError:
-            # We have no options left. Print an error message and return None.
-            print(f"\n{script_name}: ERROR: FILE NOT FOUND")
+            # We have no options left.
             return None
 
-    def find_related_scripts(self, scripts: Set[Script]) -> Set[Script]:
+    def find_related_scripts(self, scripts: Script | set[Script]) -> set[Script]:
         """
         Returns a set of all scripts (except includes) affected by changes to the given set of scripts.
 
         Args:
-            scripts (Set[Script]): The set of scripts to check for dependencies.
+            scripts (Script | set[Script]): The set of scripts to check for dependencies.
 
         Returns:
-            Set[Script]: A set of all scripts affected by changes to the provided scripts.
+            set[Script]: A set of all scripts affected by changes to the provided scripts.
         """
         # Handle single script inputs.
         if isinstance(scripts, Script):
@@ -556,7 +552,7 @@ class Compiler:
         related = set()
         for script in scripts:
             if script not in self.script_index.includes:
-                # If the script is not an include file, add it to the set.
+                # If the script is not an include file, simply add it to the set.
                 related.add(script)
             else:
                 # Otherwise, add all scripts affected by the change to the set.
@@ -571,33 +567,48 @@ class Compiler:
         Args:
             script_name (str): The name of the script to compile, e.g. `nw_s0_sleep`.
         """
-        script = (
-            self.script_index.scripts[script_name]
-            if script_name in self.script_index.scripts
-            else None
-        )
-        if script and script.contents:
-            # Check if this is an include file.
-            if not script.is_include:
-                # It is not. Generate the given script's hash. We'll remember it if this compile is successful.
-                script_hashes = ScriptIndex.update_hash_index({script})
-                # Compile the file. If the operation is successful, update the hash index.
-                if self.compile(script):
-                    ScriptIndex.write_hash_index(script_hashes)
-            else:
-                # It is an include file. Compile all dependencies.
-                print("Include file detected. Checking dependencies...", end="\n\n")
-                to_compile = self.find_related_scripts(script)
-                if to_compile:
-                    print(
-                        f"{len(to_compile)} script(s) include {script.name}.",
-                        end="\n\n",
-                    )
-                    self.compile_set(to_compile, script)
-                else:
-                    print(f"No scripts include {script.name}.")
-        else:
+        # We can only compile scripts in the script index.
+        if script_name not in self.script_index.scripts:
             print(f"Error: Unable to find {script_name}{Script.NSS}")
+            return
+        # Exclude base game scripts.
+        script = self.script_index.scripts[script_name]
+        if not script.contents:
+            print(f"Error: {script_name}{Script.NSS} is a base game script.")
+            return
+        # Next, check if the script is an include file.
+        if script.is_include:
+            # It is, so compile all dependencies.
+            print("Include file detected. Checking dependencies...", end="\n\n")
+            to_compile = {
+                script
+                for script in self.find_related_scripts(script)
+                if script.has_main
+            }
+            if not to_compile:
+                print(f"No scripts include {script.name}.")
+                return
+            print(
+                f"{len(to_compile)} script(s) include {script.name}.",
+                end="\n\n",
+            )
+            self.compile(
+                scripts=to_compile,
+                new_script_hashes=ScriptIndex.update_hash_index({script}),
+            )
+        elif script.has_main:
+            # Compile the file. If the operation is successful, update the hash index.
+            self.compile(
+                scripts=script,
+                new_script_hashes=ScriptIndex.update_hash_index({script}),
+            )
+        else:
+            # The script has no main function, so we can't compile it.
+            print(
+                f"\nError: {script_name}{Script.NSS} is an unused include file with no main function.",
+                end="\n\n",
+            )
+            return
 
     def compile_all(self) -> None:
         """
@@ -605,42 +616,18 @@ class Compiler:
 
         This is used to initialise the script index.
         """
-        # Clear all files within the output directory, as well as the script index.
-        self.reset_output_directory()
-        ScriptIndex.delete_hash_index()
-        # Load the hashes of all scripts in the script directory. We'll remember them if this compile is successful.
-        script_hashes = self.script_index.generate_hash_index()
-        # Now batch compile all script files with compile. If successful, update the hash index.
+        # Locate all relevant script files in the script index.
         scripts = {
             script
             for script in self.script_index.scripts.values()
-            if script.contents and not script.is_include
+            if script.contents and script.has_main
         }
-        if self.compile(scripts):
-            ScriptIndex.write_hash_index(script_hashes)
-
-    def compile_set(
-        self,
-        scripts: Script | Set[Script],
-        modified: Script | Set[Script],
-    ) -> None:
-        """
-        Compiles all scripts in a given set within the temporary folder and copies the results to the output directory, if successful.
-
-        Args:
-            scripts (Script | Set[Script]): The set of scripts to compile.
-            modified (Script | Set[Script]): The set of modified scripts. Used to update the hash index.
-        """
-        # Handle single script inputs.
-        if isinstance(scripts, Script):
-            scripts = {scripts}
-        if isinstance(modified, Script):
-            modified = {modified}
-        # Load the script hashes of all scripts in the given set. We'll remember them if this compile is successful.
-        script_hashes = ScriptIndex.update_hash_index(modified)
-        # Check if the operation was successful.
-        if self.compile(scripts):
-            ScriptIndex.write_hash_index(script_hashes)
+        # Clear old output files, including the hash index.
+        self.reset_output_directory()
+        # Batch compile all script files. If successful, update the hash index with the current file hashes.
+        self.compile(
+            scripts=scripts, new_script_hashes=self.script_index.generate_hash_index()
+        )
 
     def compile_modified(self) -> None:
         """
@@ -648,15 +635,20 @@ class Compiler:
         """
         # Generate a set of new and modified scripts and check what needs to be compiled.
         modified = self.script_index.get_modified_scripts()
-        to_compile = self.find_related_scripts(modified)
-        if modified and to_compile:
-            print(
-                f"{len(modified)} change(s) found. {len(to_compile)} affected script(s) will be compiled.",
-                end="\n\n",
-            )
-            self.compile_set(to_compile, modified)
-        else:
+        to_compile = {
+            script for script in self.find_related_scripts(modified) if script.has_main
+        }
+        if not modified or not to_compile:
             print("All scripts are up to date.")
+            return
+        print(
+            f"{len(modified)} change(s) found. {len(to_compile)} affected script(s) will be compiled.",
+            end="\n\n",
+        )
+        self.compile(
+            scripts=to_compile,
+            new_script_hashes=ScriptIndex.update_hash_index(modified),
+        )
 
     def compile_wildcard(self, script_name: str) -> None:
         """
@@ -675,28 +667,32 @@ class Compiler:
             for script in self.script_index.scripts.values()
             if script.contents and regex.match(script.name)
         }
-        to_compile = self.find_related_scripts(matches)
-        if matches and to_compile:
-            # Print a list of all matches, then compile the affected scripts.
-            if len(matches) < 30:
-                print(f"\n{len(matches)} match(es) found:")
-                [
-                    print(f"- {script_name}{Script.NSS}")
-                    for script_name in sorted([script.name for script in matches])
-                ]
-            else:
-                print(f"\n{len(matches)} match(es) found.")
-            print(
-                f"\n{len(to_compile)} related script(s) will be compiled.", end="\n\n"
-            )
-            self.compile_set(to_compile, matches)
-        else:
+        # We can only compile scripts with a main function.
+        to_compile = {
+            script for script in self.find_related_scripts(matches) if script.has_main
+        }
+        if not matches or not to_compile:
             print("No matches found.")
+            return
+        # Print a list of all matches, then compile the affected scripts.
+        if len(matches) < 30:
+            print(f"\n{len(matches)} match(es) found:")
+            [
+                print(f"- {script_name}{Script.NSS}")
+                for script_name in sorted([script.name for script in matches])
+            ]
+        else:
+            print(f"\n{len(matches)} match(es) found.")
+        print(f"\n{len(to_compile)} related script(s) will be compiled.", end="\n\n")
+        self.compile(
+            scripts=to_compile, new_script_hashes=ScriptIndex.update_hash_index(matches)
+        )
 
     def reset_output_directory(self) -> None:
         """
         Removes all compiled script files from the output directories.
         """
+        ScriptIndex.delete_hash_index()
         all(
             not os.remove(file)
             for directory in self.output_dirs
@@ -705,6 +701,8 @@ class Compiler:
 
 
 if __name__ == "__main__":
+    import sys
+
     # Create a script index and compile based on the given command-line parameters.
     Compiler(
         script_dir=os.path.join(os.getcwd(), "scripts"),
