@@ -241,33 +241,36 @@ class Script:
         self.hash: int = 0
 
         # Add this script to the script index if it's not included yet.
-        if self.name not in script_index.scripts:
-            script_index.scripts[self.name] = self
+        if self.name in script_index.scripts:
+            return
 
-            # We can stop early if this is a base game script.
-            if not os.path.isfile(self.path):
-                return
+        # This script has not been seen before, so add it to the script index.
+        script_index.scripts[self.name] = self
 
-            # As this script points at an existing file, parse its includes recursively.
-            with open(self.path, "rb") as file:
-                # First generate a hash for later use.
-                self.contents = file.read()
-                self.hash = int(sha256(self.contents).hexdigest(), 16)
-                # Afterwards, decode the file, strip block comments and analyse the remaining file contents.
-                contents = re.sub(
-                    script_index.regex_comments,
-                    "",
-                    self.contents.decode(encoding="ISO-8859-1"),
-                )
-                self.has_main = re.search(
-                    script_index.regex_main, contents
-                ) or re.search(script_index.regex_sc, contents)
-                self.includes = {
-                    Script(include, script_index)
-                    if include not in script_index.scripts
-                    else script_index.scripts[include]
-                    for include in re.findall(script_index.regex_includes, contents)
-                }
+        # We can stop early if this is a base game script.
+        if not os.path.isfile(self.path):
+            return
+
+        # As this script points at an existing file, parse its includes recursively.
+        with open(self.path, "rb") as file:
+            # First generate a hash for later use.
+            self.contents = file.read()
+            self.hash = int(sha256(self.contents).hexdigest(), 16)
+            # Afterwards, decode the file, strip block comments and analyse the remaining file contents.
+            contents = re.sub(
+                script_index.regex_comments,
+                "",
+                self.contents.decode(encoding="ISO-8859-1"),
+            )
+            self.has_main = re.search(script_index.regex_main, contents) or re.search(
+                script_index.regex_sc, contents
+            )
+            self.includes = {
+                Script(include, script_index)
+                if include not in script_index.scripts
+                else script_index.scripts[include]
+                for include in re.findall(script_index.regex_includes, contents)
+            }
 
     def __hash__(self) -> int:
         """
@@ -379,8 +382,9 @@ class Compiler:
         # Generate a script index to analyse the include structure.
         self.script_index = ScriptIndex(script_dir)
 
-        # Load the NWN key file. It contains the base scripts.
+        # Load the NWN key file. It should only be accessed by one thread at a time.
         self.key_reader = KeyReader(key_file)
+        self.key_reader_lock = threading.Lock()
 
         # Determine the compile mode based on the given parameters and availability of a hash index.
         if params:
@@ -503,7 +507,6 @@ class Compiler:
         compile_time = time.time() - self.start_time
         print(f"Success!\n\nTotal Execution time = {compile_time:.4f} seconds\n")
 
-    @lru_cache(maxsize=None)
     def load_script_contents(self, script_name: str) -> bytes | None:
         """
         Loads a script from the script index or the NWN installation directory.
@@ -515,25 +518,41 @@ class Compiler:
             bytes | None: The contents of the script file, or None if the file could not be found.
         """
         # First, check if the script is in the script index.
-        script_name = Script.normalise_script_name(script_name)
-        if script_name in self.script_index.scripts:
-            script = self.script_index.scripts[script_name]
-            if script.contents:
-                # If yes, directly return its contents.
-                return script.contents
-        # If not, we might find it in the NWN installation directory.
-        # First, check the overrides, which take precedence over key files.
-        script_name += Script.NSS
+        script = self.script_index.scripts.get(
+            Script.normalise_script_name(script_name)
+        )
+        if script and script.contents:
+            # If the script is in the index and has contents, return its contents.
+            return script.contents
+        return self.load_base_game_script(script_name)
+
+    @lru_cache(maxsize=None)
+    def load_base_game_script(self, script_name: str) -> bytes | None:
+        """
+        Loads a script from the NWN installation directory.
+
+        Args:
+            script_name (str): The file name of the script to load, e.g. `nw_s0_sleep.nss`.
+
+        Returns:
+            bytes | None: The contents of the script file, or None if the file could not be found.
+        """
+        # First, check if the script is in the override folder, which takes precedence.
         override = os.path.join(self.nwn_install_dir, "ovr", script_name)
         if os.path.isfile(override):
             with open(override, "rb") as file:
                 return file.read()
         try:
             # If it's not here, attempt to load it from the NWN key file.
-            return self.key_reader.read_file(script_name)
+            self.key_reader_lock.acquire()
+            file = self.key_reader.read_file(script_name)
         except FileNotFoundError:
-            # We have no options left.
-            return None
+            # This script does not exist in the game files.
+            file = None
+        finally:
+            # Always release the lock, even if the file was not found.
+            self.key_reader_lock.release()
+            return file
 
     def find_related_scripts(self, scripts: Script | set[Script]) -> set[Script]:
         """
@@ -577,7 +596,7 @@ class Compiler:
             print(f"Error: {script_name}{Script.NSS} is a base game script.")
             return
         # Next, check if the script is an include file.
-        if script.is_include:
+        if script.is_include or not script.has_main:
             # It is, so compile all dependencies.
             print("Include file detected. Checking dependencies...", end="\n\n")
             to_compile = {
@@ -596,19 +615,12 @@ class Compiler:
                 scripts=to_compile,
                 new_script_hashes=ScriptIndex.update_hash_index({script}),
             )
-        elif script.has_main:
+        else:
             # Compile the file. If the operation is successful, update the hash index.
             self.compile(
                 scripts=script,
                 new_script_hashes=ScriptIndex.update_hash_index({script}),
             )
-        else:
-            # The script has no main function, so we can't compile it.
-            print(
-                f"\nError: {script_name}{Script.NSS} is an unused include file with no main function.",
-                end="\n\n",
-            )
-            return
 
     def compile_all(self) -> None:
         """
