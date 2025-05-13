@@ -417,7 +417,7 @@ class Compiler:
         if isinstance(scripts, Script):
             scripts = {scripts}
 
-        # Prepare the thread pool executor for parallel compilation.
+        # Create a thread-local storage for the compilers.
         locals = threading.local()
 
         def init_thread() -> None:
