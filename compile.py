@@ -382,7 +382,7 @@ class Compiler:
 
         # Load the NWN key file. It should only be accessed by one thread at a time.
         self.key_reader = KeyReader(key_file)
-        self.key_reader_lock = threading.Lock()
+        self.io_lock = threading.Lock()
 
         # Determine the compile mode based on the given parameters and availability of a hash index.
         if params:
@@ -524,7 +524,9 @@ class Compiler:
         if script and script.contents:
             # If the script is in the index and has contents, return its contents.
             return script.contents
-        return self.load_base_game_script(script_name)
+        with self.io_lock:
+            # Otherwise, read the script from the NWN installation directory.
+            return self.load_base_game_script(script_name)
 
     @lru_cache(maxsize=None)
     def load_base_game_script(self, script_name: str) -> bytes | None:
@@ -544,15 +546,10 @@ class Compiler:
                 return file.read()
         try:
             # If it's not here, attempt to load it from the NWN key file.
-            self.key_reader_lock.acquire()
-            file = self.key_reader.read_file(script_name)
+            return self.key_reader.read_file(script_name)
         except FileNotFoundError:
             # This script does not exist in the game files.
-            file = None
-        finally:
-            # Always release the lock, even if the file was not found.
-            self.key_reader_lock.release()
-            return file
+            return None
 
     def find_related_scripts(self, scripts: Script | set[Script]) -> set[Script]:
         """
@@ -568,16 +565,15 @@ class Compiler:
         if isinstance(scripts, Script):
             scripts = {scripts}
         # For include files, add all scripts affected by the change to the set. Otherwise, just add the script.
-        related = set()
-        for script in scripts:
-            if script not in self.script_index.includes:
-                # If the script is not an include file, simply add it to the set.
-                related.add(script)
-            else:
-                # Otherwise, add all scripts affected by the change to the set.
-                related.update(self.script_index.includes[script])
-        # Finally, remove all include files from the set and return it.
-        return related - set(self.script_index.includes.keys())
+        scripts = scripts.union(
+            *(
+                self.script_index.includes[script]
+                for script in scripts
+                if script.is_include
+            )
+        )
+        # Drop all include files from the set. We cannot compile them.
+        return {script for script in scripts if script.has_main}
 
     def compile_script(self, script_name: str) -> None:
         """
@@ -599,11 +595,7 @@ class Compiler:
         if script.is_include or not script.has_main:
             # It is, so compile all dependencies.
             print("Include file detected. Checking dependencies...", end="\n\n")
-            to_compile = {
-                script
-                for script in self.find_related_scripts(script)
-                if script.has_main
-            }
+            to_compile = self.find_related_scripts(script)
             if not to_compile:
                 print(f"No scripts include {script.name}.")
                 return
@@ -647,9 +639,7 @@ class Compiler:
         """
         # Generate a set of new and modified scripts and check what needs to be compiled.
         modified = self.script_index.get_modified_scripts()
-        to_compile = {
-            script for script in self.find_related_scripts(modified) if script.has_main
-        }
+        to_compile = self.find_related_scripts(modified)
         if not modified or not to_compile:
             print("All scripts are up to date.")
             return
@@ -679,10 +669,7 @@ class Compiler:
             for script in self.script_index.scripts.values()
             if script.contents and wildcard.match(script.name)
         }
-        # We can only compile scripts with a main function.
-        to_compile = {
-            script for script in self.find_related_scripts(matches) if script.has_main
-        }
+        to_compile = self.find_related_scripts(matches)
         if not matches or not to_compile:
             print("No matches found.")
             return
