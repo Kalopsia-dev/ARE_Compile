@@ -44,7 +44,7 @@ class ScriptIndex:
         # Parse all scripts in the script directory, generating a script object for each.
         {
             Script(script_name, script_index=self)
-            for script_name in glob(os.path.join(directory, f"*{Script.NSS}"))
+            for script_name in glob(os.path.join(self.directory, f"*{Script.NSS}"))
         }
 
         # Flattens all includes in the scripts storage, mapping each script to its dependencies.
@@ -83,32 +83,33 @@ class ScriptIndex:
             dict[str, Script]: The flattened script index. Maps normalised script names to Script.
         """
 
-        def count_includes(index: dict[str, "Script"]) -> dict[str, int]:
+        def last_modified(
+            last_count: dict["Script", int], current_count: dict["Script", int]
+        ) -> set["Script"]:
             """
-            Returns a dictionary of include counts for each script in the index.
+            Returns a set of scripts whose include counts have changed since the last iteration.
             """
+            if last_count is None:
+                # If this is the first iteration, return all scripts with includes.
+                return set(current_count.keys())
             return {
-                script.name: len(script.includes)
-                for script in index.values()
-                if script.includes
+                script
+                for script in current_count.keys()
+                if script.includes and last_count[script] != current_count[script]
             }
 
         last_count = None
         for _ in range(10):
-            if last_count == (current_count := count_includes(index)):
+            # Map each script to its include count. We'll use this to keep track of changes.
+            current_count = {script: len(script.includes) for script in index.values()}
+            if last_count == current_count:
                 # If the include count hasn't changed since the last iteration, we can stop.
                 break
-            # Combine every entry in the script index with its corresponding include's includes.
-            any(
-                script.includes.update(include.includes)
-                for script in index.values()
-                for include in set(script.includes)
-                if script.includes
-                and (
-                    last_count is None  # First iteration.
-                    or (last_count[script.name] != current_count[script.name])
+            # Combine each script's set of includes with the includes' sets of includes.
+            for script in last_modified(last_count, current_count):
+                script.includes.update(
+                    *(include.includes for include in script.includes),
                 )
-            )
             # Update the stored include count for the next iteration.
             last_count = current_count
         return index
@@ -356,9 +357,6 @@ class Compiler:
         if not os.path.isfile(key_file):
             print(f'Error: Unable to locate NWN key file at "{key_file}"')
             exit(1)
-        if secondary_output_dir:
-            os.makedirs(secondary_output_dir, exist_ok=True)
-        os.makedirs(output_dir, exist_ok=True)
 
         # Store the current time to calculate the total execution time later.
         self.start_time = time.time()
@@ -496,6 +494,8 @@ class Compiler:
         print("\nWriting script(s) to output folder...")
         for ncs_name, ncs in compiled.items():
             for output_dir in self.output_dirs:
+                # First, ensure the directory exists.
+                os.makedirs(output_dir, exist_ok=True)
                 # Write the compiled script to the output directory.
                 with open(os.path.join(output_dir, ncs_name), "wb") as outfile:
                     outfile.write(ncs)
@@ -635,7 +635,7 @@ class Compiler:
             if script.contents and script.has_main
         }
         # Clear old output files, including the hash index.
-        self.reset_output_directory()
+        self.clear_output_folders()
         # Batch compile all script files. If successful, update the hash index with the current file hashes.
         self.compile(
             scripts=scripts, new_script_hashes=self.script_index.generate_hash_index()
@@ -673,11 +673,11 @@ class Compiler:
         if script_name == "*":
             return self.compile_all()
         # Check if the wildcard matches any scripts.
-        regex = re.compile(script_name.replace("*", ".*"), re.IGNORECASE)
+        wildcard = re.compile(script_name.replace("*", ".*"), re.IGNORECASE)
         matches = {
             script
             for script in self.script_index.scripts.values()
-            if script.contents and regex.match(script.name)
+            if script.contents and wildcard.match(script.name)
         }
         # We can only compile scripts with a main function.
         to_compile = {
@@ -686,30 +686,22 @@ class Compiler:
         if not matches or not to_compile:
             print("No matches found.")
             return
-        # Print a list of all matches, then compile the affected scripts.
-        if len(matches) < 30:
-            print(f"\n{len(matches)} match(es) found:")
-            [
-                print(f"- {script_name}{Script.NSS}")
-                for script_name in sorted([script.name for script in matches])
-            ]
-        else:
-            print(f"\n{len(matches)} match(es) found.")
-        print(f"\n{len(to_compile)} related script(s) will be compiled.", end="\n\n")
+        print(
+            f"\n{len(matches)} match(es) found. {len(to_compile)} related script(s) will be compiled.",
+            end="\n\n",
+        )
         self.compile(
             scripts=to_compile, new_script_hashes=ScriptIndex.update_hash_index(matches)
         )
 
-    def reset_output_directory(self) -> None:
+    def clear_output_folders(self) -> None:
         """
         Removes all compiled script files from the output directories.
         """
         ScriptIndex.delete_hash_index()
-        all(
-            not os.remove(file)
-            for directory in self.output_dirs
-            for file in glob(os.path.join(directory, f"*{Script.NCS}"))
-        )
+        for directory in self.output_dirs:
+            for file in glob(os.path.join(directory, f"*{Script.NCS}")):
+                os.remove(file)
 
 
 if __name__ == "__main__":
