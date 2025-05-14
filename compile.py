@@ -165,7 +165,7 @@ class HashIndex:
             dict[str, int]: The index of script hashes. Maps script file names to their hashes.
         """
         if os.path.exists(HashIndex.PATH):
-            with open(HashIndex.PATH, "r") as hashes:
+            with open(HashIndex.PATH, "rb") as hashes:
                 return json.load(hashes)
         else:
             return dict()
