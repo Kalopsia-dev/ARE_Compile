@@ -21,7 +21,7 @@ class Script:
 
     def __init__(self, name: str, script_index: "ScriptIndex") -> None:
         """
-        Initialises a new Script and the Scripts included by it using its file name.
+        Initialises a new script and the scripts it includes.
 
         Args:
             name (str): The name of the script file, e.g. `nw_s0_sleep`.
@@ -336,7 +336,7 @@ class ScriptIndex:
         self.scripts[script.name] = script
         return script
 
-    def get(self, script_name: str, default: any = None) -> Script:
+    def get(self, script_name: str) -> Script | None:
         """
         Returns a script object from the script index.
 
@@ -344,20 +344,20 @@ class ScriptIndex:
             script_name (str): The name of the script to retrieve.
 
         Returns:
-            Script: The requested script object, or None if it does not exist in the index.
+            Script | None: The requested script object, or None if it does not exist in the index.
         """
-        return self.scripts.get(ScriptIndex.normalise_script_name(script_name), default)
+        return self.scripts.get(ScriptIndex.normalise_script_name(script_name))
 
     def get_or_create(self, script_name: str) -> "Script":
         """
-        Creates a new Script object and adds it to the script index.
+        Creates a new script object and adds it to the script index.
 
         Args:
             script_name (str): The name of the script file to create.
             script_index (ScriptIndex): The script index to add the script to.
 
         Returns:
-            Script: The newly created Script object.
+            Script: The newly created script object.
         """
         if (script := self.get(script_name)) is not None:
             # If the script already exists in the index, return it.
@@ -793,10 +793,8 @@ class Compiler:
             case _:
                 return None
 
-        if os.path.isdir(path):
-            return path
-
-        return None
+        # If the path exists, return it.
+        return path if os.path.isdir(path) else None
 
 
 if __name__ == "__main__":
