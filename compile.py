@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -444,7 +445,9 @@ class Compiler:
         if not os.path.exists(script_dir):
             print(f'Error: Unable to locate script directory at "{script_dir}"')
             exit(1)
-        if not os.path.exists(nwn_install_dir):
+        # Try to automatically locate an NWN installation directory if it is not provided.
+        nwn_install_dir = nwn_install_dir or Compiler.locate_nwn_directory()
+        if not nwn_install_dir or not os.path.exists(nwn_install_dir):
             print(f'Error: Unable to locate NWN installation at "{nwn_install_dir}"')
             exit(1)
         key_file = os.path.join(nwn_install_dir, "data", "nwn_base.key")
@@ -761,10 +764,42 @@ class Compiler:
             for file in glob(os.path.join(directory, "*.ncs")):
                 os.remove(file)
 
+    @staticmethod
+    def locate_nwn_directory() -> str | None:
+        """
+        Attempts to find the NWN installation directory by checking common locations.
+
+        Returns:
+            str | None: The path to the NWN installation directory, or None if it could not be found.
+        """
+        if path := os.environ.get("NWN_ROOT"):
+            # If the NWN_ROOT environment variable is set, use it.
+            return path
+
+        match sys.platform:
+            # Check for common NWN installation directories based on the platform.
+            case "linux" | "linux2":
+                path = os.path.expanduser(
+                    "~/.local/share/Steam/steamapps/common/Neverwinter Nights"
+                )
+            case "darwin":
+                path = os.path.expanduser(
+                    "~/Library/Application Support/Steam/steamapps/common/Neverwinter Nights"
+                )
+            case "win32":
+                path = (
+                    r"C:\Program Files (x86)\Steam\steamapps\common\Neverwinter Nights"
+                )
+            case _:
+                return None
+
+        if os.path.isdir(path):
+            return path
+
+        return None
+
 
 if __name__ == "__main__":
-    import sys
-
     # Create a script index and compile based on the given command-line parameters.
     Compiler(
         script_dir=os.path.join(os.getcwd(), "scripts"),
