@@ -802,8 +802,8 @@ class Compiler:
 if __name__ == "__main__":
     # Create a script index and compile based on the given command-line parameters.
     Compiler(
-        script_dir=os.path.join(os.getcwd(), "scripts"),
-        output_dir=os.path.join(os.getcwd(), "compiled-scripts"),
-        nwn_install_dir=None,  # TODO: Add your NWN install directory here!
+        script_dir=os.path.join(os.getcwd(), "input_nss"),
+        output_dir=os.path.join(os.getcwd(), "output"),
+        nwn_install_dir=None,  # TODO: If needed, add your NWN install directory here.
         params=sys.argv[1:],
     )
