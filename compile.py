@@ -18,8 +18,6 @@ class Script:
     Represents an individual script file and its dependencies.
     """
 
-    ENCODING = "ISO-8859-1"
-
     def __init__(self, name: str, script_index: "ScriptIndex") -> None:
         """
         Initialises a new Script and the Scripts included by it using its file name.
@@ -28,31 +26,22 @@ class Script:
             name (str): The name of the script file, e.g. `nw_s0_sleep`.
             script_index (ScriptIndex): The script index to use for resolving dependencies.
         """
-        # Initialise the script name and path, then check if the file exists.
-        self.name = ScriptIndex.normalise_script_name(name)
-        self.hash = 0
-
-        # Scripts should be unique, so if this script has already been seen, we can stop early.
-        if self.name in script_index:
-            return
-
         # Initialise class variables.
-        self.path = ""
-        self.contents = None
-        self.includes = set()
-        self.has_main = False
+        self.name = ScriptIndex.normalise_script_name(name)
+        self.index = script_index
         self.is_include = False
 
-        # This script has not been seen before, so add it to the script index.
-        script_index.add(self)
-
         # If there is no associated file, this is a base game script and can be skipped.
-        self.path = os.path.join(script_index.directory, f"{self.name}.nss")
-        if not os.path.isfile(self.path):
+        script_path = os.path.join(script_index.directory, f"{self.name}.nss")
+        if not os.path.isfile(script_path):
+            self.hash = hash(self.name)
+            self.includes = set()
+            self.contents = None
+            self.has_main = False
             return
 
         # Since this script points to an existing file, we will parse it.
-        with open(self.path, "rb") as file:
+        with open(script_path, "rb") as file:
             self.contents = file.read()
 
         # First generate a hash for later use.
@@ -62,11 +51,11 @@ class Script:
         contents = re.sub(
             script_index.regex_comments,
             "",
-            self.contents.decode(encoding=Script.ENCODING),
+            self.contents.decode(encoding="ISO-8859-1"),
         )
         self.has_main = re.search(script_index.regex_main_fns, contents)
         self.includes = {
-            script_index.get(include_name, Script(include_name, script_index))
+            script_index.get_or_create(include_name)
             for include_name in re.findall(script_index.regex_includes, contents)
         }
 
@@ -80,7 +69,7 @@ class Script:
         """
         return self.hash
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: "Script") -> bool:
         """
         Compares scripts based on their hash values.
 
@@ -88,13 +77,11 @@ class Script:
             other (Script): The script to compare with.
 
         Returns:
-            bool: True if the scripts are equal, False otherwise.
+            bool: True if the scripts represent the same file, False otherwise.
         """
-        if self is other:
-            return True
         if not isinstance(other, Script):
             return False
-        return self.name == other.name and self.hash == other.hash
+        return self.hash == other.hash and self.name == other.name
 
     def __repr__(self) -> str:
         """
@@ -213,15 +200,17 @@ class ScriptIndex:
         Args:
             directory (str): The directory containing the custom script files to compile.
         """
+        if not os.path.isdir(script_dir):
+            raise FileNotFoundError(f"Script directory '{script_dir}' does not exist.")
+
         print("Indexing scripts...")
         self.directory = script_dir
         self.scripts = dict()
 
         # Parse all scripts in the script directory, generating a script object for each.
         for script_name in glob(os.path.join(self.directory, "*.nss")):
-            if script_name not in self:
-                # The scripts will self-register themselves in the script index.
-                Script(script_name, script_index=self)
+            # The scripts will self-register themselves in the script index.
+            self.get_or_create(script_name)
 
         def flatten_include_tree() -> None:
             """
@@ -260,8 +249,7 @@ class ScriptIndex:
 
         def group_by_includes() -> dict[Script, set[Script]]:
             """
-            Returns an inverted script index where include files point at their children.
-            Also flags include files as such.
+            Returns a mapping of include files to their child scripts, and flags includes as such.
 
             Returns:
                 dict[Script, set[Script]]: The inverted script index. Maps include files to their child scripts.
@@ -313,14 +301,18 @@ class ScriptIndex:
             return script in self.scripts.values()
         return ScriptIndex.normalise_script_name(script) in self.scripts
 
-    def add(self, script: Script) -> None:
+    def add(self, script: Script) -> Script:
         """
         Adds a script to the script index. Should be called before flattening the index.
 
         Args:
             script (Script): The script to add to the index.
+
+        Returns:
+            Script: The added script object.
         """
         self.scripts[script.name] = script
+        return script
 
     def get(self, script_name: str, default: any = None) -> Script:
         """
@@ -333,6 +325,22 @@ class ScriptIndex:
             Script: The requested script object, or None if it does not exist in the index.
         """
         return self.scripts.get(ScriptIndex.normalise_script_name(script_name), default)
+
+    def get_or_create(self, script_name: str) -> "Script":
+        """
+        Creates a new Script object and adds it to the script index.
+
+        Args:
+            script_name (str): The name of the script file to create.
+            script_index (ScriptIndex): The script index to add the script to.
+
+        Returns:
+            Script: The newly created Script object.
+        """
+        if (script := self.get(script_name)) is not None:
+            # If the script already exists in the index, return it.
+            return script
+        return self.add(Script(script_name, script_index=self))
 
     def get_modified(self) -> set[Script]:
         """
@@ -647,7 +655,7 @@ class Compiler:
                 new_hash_index=HashIndex.apply({script}),
             )
         else:
-            # Compile the file. If the operation is successful, update the hash index.
+            # This is a normal script, so compile it directly.
             self.compile(
                 scripts=script,
                 new_hash_index=HashIndex.apply({script}),
