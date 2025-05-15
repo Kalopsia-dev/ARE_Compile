@@ -87,8 +87,29 @@ class Script:
         """
         Returns a string representation of the script.
         """
-        is_include = self.is_include or not self.has_main
-        return f"{self.name.ljust(16)} <{'Script' if not is_include else 'Include'} with {len(self.includes)} parent(s)>"
+
+        def format_name(
+            script_type: str,
+            dependencies: int | None = None,
+            derived: int | None = None,
+        ) -> str:
+            """
+            Creates a Terminal-friendly representation of the script name and its type.
+            """
+            result = f"{self.name.ljust(16)} {script_type.ljust(9)}"
+            if dependencies is not None:
+                result += f" {dependencies:3d} dependencies"
+            if derived is not None:
+                result += f", {derived:4d} derived"
+            return result
+
+        if not self.contents:
+            return format_name("[Base Script]")
+        dependencies = len(self.includes)
+        if self.is_include or not self.has_main:
+            derived = len(self.index.includes.get(self, set()))
+            return format_name("[Include]", dependencies, derived)
+        return format_name("[Script]", dependencies)
 
 
 class HashIndex:
@@ -691,7 +712,7 @@ class Compiler:
             print("All scripts are up to date.")
             return
         print(
-            f"\n{len(modified)} change(es) found:",
+            f"\n{len(modified)} change(s) found:",
             f"\n- {'\n- '.join(sorted(str(script) for script in modified))}\n",
             f"\n{len(to_compile)} related script(s) will be compiled.",
             end="\n\n",
