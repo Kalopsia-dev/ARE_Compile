@@ -201,7 +201,7 @@ class ScriptIndex:
 
     # Regular expressions for parsing script files. Pre-compiled for best performance.
     regex_comments = re.compile(r"//.*?$|/\*[\s\S]*?\*/", re.MULTILINE | re.DOTALL)
-    regex_includes = re.compile(r'^#include\s+"([^"]+)"(?![^"\n]*//)', re.MULTILINE)
+    regex_includes = re.compile(r'^\s*#include\s+"([^"]+)"(?![^"\n]*//)', re.MULTILINE)
     regex_main_fns = re.compile(
         r"^\s*(?:void\s+main|int\s+StartingConditional)\s*\(\s*\)", re.MULTILINE
     )
