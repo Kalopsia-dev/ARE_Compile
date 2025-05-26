@@ -484,9 +484,20 @@ class Compiler:
         self.io_lock = threading.Lock()
 
         # Cache the key file names to speed up script loading.
-        self.nwn_base_nss = set(self.nwn_base.filenames())
+        self.nwn_base_nss = {
+            script_name
+            for script_name in self.nwn_base.filenames()
+            if script_name.endswith(".nss")
+        }
+        # If the retail key file exists, cache its script names as well.
         self.nwn_retail_nss = (
-            set(self.nwn_retail.filenames()) if self.nwn_retail else set()
+            {
+                script_name
+                for script_name in self.nwn_retail.filenames()
+                if script_name.endswith(".nss")
+            }
+            if self.nwn_retail is not None
+            else set()
         )
 
         # Determine the compile mode based on the given parameters and availability of a hash index.
