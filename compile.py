@@ -450,9 +450,10 @@ class Compiler:
         if not nwn_install_dir or not os.path.exists(nwn_install_dir):
             print(f'Error: Unable to locate NWN installation at "{nwn_install_dir}"')
             exit(1)
-        key_file = os.path.join(nwn_install_dir, "data", "nwn_base.key")
-        if not os.path.isfile(key_file):
-            print(f'Error: Unable to locate NWN key file at "{key_file}"')
+        nwn_base = os.path.join(nwn_install_dir, "data", "nwn_base.key")
+        nwn_retail = os.path.join(nwn_install_dir, "data", "nwn_retail.key")
+        if not os.path.isfile(nwn_base):
+            print(f'Error: Unable to locate NWN key file at "{nwn_base}"')
             exit(1)
 
         # Store the current time to calculate the total execution time later.
@@ -477,9 +478,16 @@ class Compiler:
         # Generate a script index to analyse the include structure.
         self.script_index = ScriptIndex(script_dir)
 
-        # Load the NWN key file. It should only be accessed by one thread at a time.
-        self.key_reader = KeyReader(key_file)
+        # Load the NWN key files. They should only be accessed by one thread at a time.
+        self.nwn_base = KeyReader(nwn_base)
+        self.nwn_retail = KeyReader(nwn_retail) if os.path.isfile(nwn_retail) else None
         self.io_lock = threading.Lock()
+
+        # Cache the key file names to speed up script loading.
+        self.nwn_base_files = set(self.nwn_base.filenames())
+        self.nwn_retail_files = set(
+            self.nwn_retail.filenames() if self.nwn_retail else []
+        )
 
         # Determine the compile mode based on the given parameters and availability of a hash index.
         if params:
@@ -634,17 +642,20 @@ class Compiler:
         Returns:
             bytes | None: The contents of the script file, or None if the file could not be found.
         """
-        # First, check if the script is in the override folder, which takes precedence.
-        override = os.path.join(self.nwn_install_dir, "ovr", script_name)
-        if os.path.isfile(override):
-            with open(override, "rb") as file:
-                return file.read()
-        try:
+        if script_name in self.nwn_retail_files:
+            # Load the script from the retail keyfile, introduced in version 89.8193.37.
+            return self.nwn_retail.read_file(script_name)
+        else:
+            # Check if the script is in the override folder, which takes precedence.
+            override = os.path.join(self.nwn_install_dir, "ovr", script_name)
+            if os.path.isfile(override):
+                with open(override, "rb") as file:
+                    return file.read()
+        if script_name in self.nwn_base_files:
             # If it's not here, attempt to load it from the NWN key file.
-            return self.key_reader.read_file(script_name)
-        except FileNotFoundError:
-            # This script does not exist in the game files.
-            return None
+            return self.nwn_base.read_file(script_name)
+        # This script does not exist in the game files.
+        return None
 
     def compile_script(self, script_name: str) -> None:
         """
