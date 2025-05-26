@@ -484,9 +484,9 @@ class Compiler:
         self.io_lock = threading.Lock()
 
         # Cache the key file names to speed up script loading.
-        self.nwn_base_files = set(self.nwn_base.filenames())
-        self.nwn_retail_files = set(
-            self.nwn_retail.filenames() if self.nwn_retail else []
+        self.nwn_base_nss = set(self.nwn_base.filenames())
+        self.nwn_retail_nss = (
+            set(self.nwn_retail.filenames()) if self.nwn_retail else set()
         )
 
         # Determine the compile mode based on the given parameters and availability of a hash index.
@@ -627,9 +627,8 @@ class Compiler:
         if script and script.contents:
             # If the script is in the index and has contents, return its contents.
             return script.contents
-        with self.io_lock:
-            # Otherwise, read the script from the NWN installation directory.
-            return self.__load_game_script__(script_name)
+        # Otherwise, read the script from the NWN installation directory.
+        return self.__load_game_script__(script_name)
 
     @lru_cache(maxsize=None)
     def __load_game_script__(self, script_name: str) -> bytes | None:
@@ -642,18 +641,20 @@ class Compiler:
         Returns:
             bytes | None: The contents of the script file, or None if the file could not be found.
         """
-        if script_name in self.nwn_retail_files:
-            # Load the script from the retail keyfile, introduced in version 89.8193.37.
-            return self.nwn_retail.read_file(script_name)
-        else:
-            # Check if the script is in the override folder, which takes precedence.
-            override = os.path.join(self.nwn_install_dir, "ovr", script_name)
-            if os.path.isfile(override):
-                with open(override, "rb") as file:
-                    return file.read()
-        if script_name in self.nwn_base_files:
-            # If it's not here, attempt to load it from the NWN key file.
-            return self.nwn_base.read_file(script_name)
+        if script_name in self.nwn_retail_nss:
+            with self.io_lock:
+                # Load the script from the retail keyfile, introduced in NWN v89.8193.37.
+                return self.nwn_retail.read_file(script_name)
+        elif self.nwn_retail is None and os.path.isfile(
+            override_nss := os.path.join(self.nwn_install_dir, "ovr", script_name)
+        ):
+            # NWN v89.8193.36 and below have an "ovr" folder, which takes precedence over key files.
+            with self.io_lock, open(override_nss, "rb") as file:
+                return file.read()
+        elif script_name in self.nwn_base_nss:
+            with self.io_lock:
+                # If it's not here, attempt to load it from the NWN key file.
+                return self.nwn_base.read_file(script_name)
         # This script does not exist in the game files.
         return None
 
