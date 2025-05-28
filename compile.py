@@ -616,6 +616,10 @@ class Compiler:
         if isinstance(scripts, Script):
             scripts = {scripts}
 
+        if not scripts:
+            print("No scripts to compile.\n\nOperation aborted.", end="\n\n")
+            return
+
         # Create a thread-local storage for the compilers.
         locals = threading.local()
 
