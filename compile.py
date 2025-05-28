@@ -621,17 +621,19 @@ class Compiler:
             return
 
         # Create a thread-local storage for the compilers.
+        init_lock = threading.Lock()
         locals = threading.local()
 
-        def init_thread() -> None:
+        def init_compiler() -> None:
             """
             Initialises a thread-local compiler instance.
             """
-            locals.compiler = ScriptComp(
-                resolver=self.load_script,
-                debug_info=False,
-                max_include_depth=64,
-            )
+            with init_lock:
+                locals.compiler = ScriptComp(
+                    resolver=self.load_script,
+                    debug_info=False,
+                    max_include_depth=64,
+                )
 
         def compile_in_thread(script: Script) -> tuple[str | None, bytes | None]:
             """
@@ -659,7 +661,7 @@ class Compiler:
             successful = True
             # We will use threads because ScriptComp is not subject to the GIL.
             with ThreadPoolExecutor(
-                initializer=init_thread,
+                initializer=init_compiler,
                 max_workers=min(self.num_workers, len(scripts)),
             ) as executor:
                 # Asynchronously compile all scripts in the given set.
