@@ -415,6 +415,105 @@ class ScriptIndex:
         return file_name.lower()
 
 
+class BaseScriptReader:
+    """
+    A class that reads scripts from a NWN key file or game script directory.
+    """
+
+    def __init__(self, file_or_dir: str) -> None:
+        """
+        Initialises a new BaseScriptReader instance.
+
+        Args:
+            file_or_dir (str): The path to the NWN key file or game script directory.
+        """
+        # Initialise class variables.
+        self.lock = threading.Lock()
+        self.path = file_or_dir
+        self.reader = None
+        self.scripts = set()
+
+        if os.path.isdir(self.path):
+            # If a directory is given, parse its script files.
+            self.scripts = {
+                os.path.basename(script_name)
+                for script_name in glob(os.path.join(self.path, "*.nss"))
+            }
+        elif os.path.isfile(self.path) and self.path.endswith(".key"):
+            # If a key file is given, read it using the KeyReader.
+            self.reader = KeyReader(self.path)
+            self.scripts = {
+                script_name
+                for script_name in self.reader.filenames()
+                if script_name.endswith(".nss")
+            }
+
+    def __contains__(self, script_name: str) -> bool:
+        """
+        Checks if a script is in the key file.
+
+        Args:
+            script_name (str): The name of the script to check for.
+
+        Returns:
+            bool: True if the script is in the key file, False otherwise.
+        """
+        return script_name in self.scripts
+
+    @lru_cache(maxsize=None)
+    def get(self, script_name: str) -> bytes | None:
+        """
+        Reads a script file from the key file.
+
+        Args:
+            script_name (str): The name of the script to read.
+
+        Returns:
+            bytes | None: The contents of the script file, or None if it does not exist.
+        """
+        if script_name not in self:
+            return None
+        if self.reader:
+            with self.lock:
+                # If a key file is available, read the script from it.
+                return self.reader.read_file(script_name)
+        # If a directory is given, read the script from the file system.
+        with self.lock, open(os.path.join(self.path, script_name), "rb") as file:
+            return file.read()
+
+    @staticmethod
+    def locate_game() -> str | None:
+        """
+        Attempts to find the NWN installation directory by checking common locations.
+
+        Returns:
+            str | None: The path to the NWN installation directory, or None if it could not be found.
+        """
+        if path := os.environ.get("NWN_ROOT"):
+            # If the NWN_ROOT environment variable is set, use it.
+            return path
+
+        match sys.platform:
+            # Check for common NWN installation directories based on the platform.
+            case "linux" | "linux2":
+                path = os.path.expanduser(
+                    "~/.local/share/Steam/steamapps/common/Neverwinter Nights"
+                )
+            case "darwin":
+                path = os.path.expanduser(
+                    "~/Library/Application Support/Steam/steamapps/common/Neverwinter Nights"
+                )
+            case "win32":
+                path = (
+                    r"C:\Program Files (x86)\Steam\steamapps\common\Neverwinter Nights"
+                )
+            case _:
+                return None
+
+        # If the path exists, return it.
+        return path if os.path.isdir(path) else None
+
+
 class Compiler:
     """
     A compiler that intelligently compiles scripts based on their include relations and hash changes.
@@ -446,10 +545,12 @@ class Compiler:
             print(f'Error: Unable to locate script directory at "{script_dir}"')
             exit(1)
         # Try to automatically locate an NWN installation directory if it is not provided.
-        nwn_install_dir = nwn_install_dir or Compiler.locate_nwn_directory()
+        nwn_install_dir = nwn_install_dir or BaseScriptReader.locate_game()
         if not nwn_install_dir or not os.path.exists(nwn_install_dir):
             print(f'Error: Unable to locate NWN installation at "{nwn_install_dir}"')
             exit(1)
+        # Define the game script sources. Only nwn_base is mandatory, nwn_retail and nwn_ovr are optional.
+        nwn_ovr = os.path.join(nwn_install_dir, "ovr")
         nwn_base = os.path.join(nwn_install_dir, "data", "nwn_base.key")
         nwn_retail = os.path.join(nwn_install_dir, "data", "nwn_retail.key")
         if not os.path.isfile(nwn_base):
@@ -460,7 +561,6 @@ class Compiler:
         self.start_time = time.time()
 
         # Store the given parameters and directories.
-        self.nwn_install_dir = nwn_install_dir
         self.output_dirs = [output_dir]
         if secondary_output_dir:
             self.output_dirs.append(secondary_output_dir)
@@ -479,26 +579,9 @@ class Compiler:
         self.script_index = ScriptIndex(script_dir)
 
         # Load the NWN key files. They should only be accessed by one thread at a time.
-        self.nwn_base = KeyReader(nwn_base)
-        self.nwn_retail = KeyReader(nwn_retail) if os.path.isfile(nwn_retail) else None
-        self.io_lock = threading.Lock()
-
-        # Cache the key file names to speed up script loading.
-        self.nwn_base_nss = {
-            script_name
-            for script_name in self.nwn_base.filenames()
-            if script_name.endswith(".nss")
-        }
-        # If the retail key file exists, cache its script names as well.
-        self.nwn_retail_nss = (
-            {
-                script_name
-                for script_name in self.nwn_retail.filenames()
-                if script_name.endswith(".nss")
-            }
-            if self.nwn_retail is not None
-            else set()
-        )
+        self.nwn_base = BaseScriptReader(nwn_base)
+        self.nwn_retail = BaseScriptReader(nwn_retail)
+        self.nwn_ovr = BaseScriptReader(nwn_ovr)
 
         # Determine the compile mode based on the given parameters and availability of a hash index.
         if params:
@@ -608,10 +691,10 @@ class Compiler:
 
         # If we got here, all scripts compiled successfully. Copy their binaries to the output dirs.
         print("\nWriting script(s) to output folder...")
-        for ncs_name, ncs in compiled.items():
-            for output_dir in self.output_dirs:
-                # First, ensure the directory exists.
-                os.makedirs(output_dir, exist_ok=True)
+        for output_dir in self.output_dirs:
+            # First, ensure the directory exists.
+            os.makedirs(output_dir, exist_ok=True)
+            for ncs_name, ncs in compiled.items():
                 # Write the compiled script to the output directory.
                 with open(os.path.join(output_dir, ncs_name), "wb") as outfile:
                     outfile.write(ncs)
@@ -633,39 +716,18 @@ class Compiler:
         Returns:
             bytes | None: The contents of the script file, or None if the file could not be found.
         """
-        # First, check if the script is in the script index.
-        script = self.script_index.get(script_name)
-        if script and script.contents:
-            # If the script is in the index and has contents, return its contents.
+        # First, check if the script is in the script index, and we read its contents.
+        if (script := self.script_index.get(script_name)) and script.contents:
             return script.contents
-        # Otherwise, read the script from the NWN installation directory.
-        return self.__load_game_script__(script_name)
-
-    @lru_cache(maxsize=None)
-    def __load_game_script__(self, script_name: str) -> bytes | None:
-        """
-        Loads a script from the NWN installation directory.
-
-        Args:
-            script_name (str): The file name of the script to load, e.g. `nw_s0_sleep.nss`.
-
-        Returns:
-            bytes | None: The contents of the script file, or None if the file could not be found.
-        """
-        if script_name in self.nwn_retail_nss:
-            with self.io_lock:
-                # Load the script from the retail keyfile, introduced in NWN v89.8193.37.
-                return self.nwn_retail.read_file(script_name)
-        elif self.nwn_retail is None and os.path.isfile(
-            override_nss := os.path.join(self.nwn_install_dir, "ovr", script_name)
-        ):
-            # NWN v89.8193.36 and below have an "ovr" folder, which takes precedence over key files.
-            with self.io_lock, open(override_nss, "rb") as file:
-                return file.read()
-        elif script_name in self.nwn_base_nss:
-            with self.io_lock:
-                # If it's not here, attempt to load it from the NWN key file.
-                return self.nwn_base.read_file(script_name)
+        # Fallback to the NWN installation. First, try the retail keyfile, added in v89.8193.37.
+        if script := self.nwn_retail.get(script_name):
+            return script
+        # Alternatively, use the "ovr" folder, supported by prior NWN versions.
+        elif script := self.nwn_ovr.get(script_name):
+            return script
+        # If the script has not been found by now, it must be a base game script.
+        if script := self.nwn_base.get(script_name):
+            return script
         # This script does not exist in the game files.
         return None
 
@@ -786,38 +848,6 @@ class Compiler:
         for directory in self.output_dirs:
             for file in glob(os.path.join(directory, "*.ncs")):
                 os.remove(file)
-
-    @staticmethod
-    def locate_nwn_directory() -> str | None:
-        """
-        Attempts to find the NWN installation directory by checking common locations.
-
-        Returns:
-            str | None: The path to the NWN installation directory, or None if it could not be found.
-        """
-        if path := os.environ.get("NWN_ROOT"):
-            # If the NWN_ROOT environment variable is set, use it.
-            return path
-
-        match sys.platform:
-            # Check for common NWN installation directories based on the platform.
-            case "linux" | "linux2":
-                path = os.path.expanduser(
-                    "~/.local/share/Steam/steamapps/common/Neverwinter Nights"
-                )
-            case "darwin":
-                path = os.path.expanduser(
-                    "~/Library/Application Support/Steam/steamapps/common/Neverwinter Nights"
-                )
-            case "win32":
-                path = (
-                    r"C:\Program Files (x86)\Steam\steamapps\common\Neverwinter Nights"
-                )
-            case _:
-                return None
-
-        # If the path exists, return it.
-        return path if os.path.isdir(path) else None
 
 
 if __name__ == "__main__":
