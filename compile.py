@@ -4,6 +4,7 @@ import re
 import sys
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from glob import glob
@@ -684,9 +685,11 @@ class Compiler:
             # Gracefully handle keyboard interrupts.
             print("\nStopping processing on user request.", end="\n\n")
             successful = False
-        except Exception as e:
+        except Exception:
             # Handle all other exceptions.
-            print(e.with_traceback())
+            print("\nAn unexpected error occurred during compilation:", end="\n\n")
+            traceback.print_exc()
+            print("\nStopping processing.", end="\n\n")
             successful = False
         finally:
             if not successful:
