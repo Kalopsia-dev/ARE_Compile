@@ -12,6 +12,7 @@ A compiler extension for NWScript projects, used to accelerate [Arelith](https:/
 ### Requirements
 - ARE_Compile supports Python version 3.12 or newer. Earlier versions may work, but are untested.
 - Requires [`nwn`](https://pypi.org/project/nwn/) (from PyPI) to read game files and compile scripts. Version `0.0.12` is currently recommended.
+- If installed, `tqdm` will be used to display progress bars. ARE_Compile works just fine without it, though.
 
 ### Setup
 - Download the repository and copy your custom NWScript files into the `input_nss` folder (or modify the `Compiler` init arguments accordingly)

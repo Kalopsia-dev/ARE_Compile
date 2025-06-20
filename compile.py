@@ -515,6 +515,58 @@ class BaseScriptReader:
         return path if os.path.isdir(path) else None
 
 
+class ProgressBar:
+    def __init__(self, total: int) -> None:
+        """
+        Wrapper for a `tqdm` progress bar to display compilation progress.
+        If `tqdm` is not available, it falls back to a simple print statement.
+
+        Args:
+            total (int): The total number of items to process.
+        """
+        if total < 2:
+            # No need to spawn a progress bar for just one item.
+            self.progress = None
+            return
+        try:
+            from tqdm import tqdm
+
+            self.progress = tqdm(
+                total=total,
+                desc="Compiling",
+                unit="script",
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+                leave=True,
+            )
+        except ImportError:
+            print("Compiling...")
+            self.progress = None
+
+    def update(self, n: int = 1) -> None:
+        """
+        Updates the progress bar by the given amount.
+
+        Args:
+            n (int): The number of items processed. Defaults to 1.
+        """
+        if self.progress:
+            self.progress.update(n)
+
+    def close(self, leave: bool = True) -> None:
+        """
+        Closes the progress bar and cleans up resources.
+
+        Args:
+            leave (bool): Whether to leave the progress bar on the screen after closing. Defaults to True.
+        """
+        if not self.progress:
+            return
+        # If the progress bar is still active, close it.
+        self.progress.leave = leave
+        self.progress.close()
+        self.progress = None
+
+
 class Compiler:
     """
     A compiler that intelligently compiles scripts based on their include relations and hash changes.
@@ -625,6 +677,9 @@ class Compiler:
         init_lock = threading.Lock()
         locals = threading.local()
 
+        # Initialise a progress bar for the compilation process.
+        progress = ProgressBar(total=len(scripts))
+
         def init_compiler() -> None:
             """
             Initialises a thread-local compiler instance.
@@ -648,13 +703,14 @@ class Compiler:
             Raises:
                 CompilationError: If the compilation fails.
             """
-            print(f"Compiling: {script.name}")
             try:
                 # Attempt to compile the script using the thread-local compiler instance.
                 ncs_bytes = locals.compiler.compile(script.name)[0]
+                progress.update()
                 return f"{script.name}.ncs", ncs_bytes
             except CompilationError as error:
                 # Format, print and raise the error. It will then interrupt the thread pool.
+                progress.close()
                 print(f"\n{error.message.splitlines()[0].split(' [')[0]}")
                 raise error
 
@@ -670,10 +726,11 @@ class Compiler:
                     ncs_name: ncs_bytes
                     for ncs_name, ncs_bytes in executor.map(
                         compile_in_thread,
-                        sorted(scripts, key=lambda script: script.name),
+                        scripts,
                     )
                     if ncs_bytes is not None
                 }
+                progress.close()
         except CompilationError:
             # Compilation errors should stop all threads.
             print(
@@ -683,10 +740,12 @@ class Compiler:
             successful = False
         except KeyboardInterrupt:
             # Gracefully handle keyboard interrupts.
+            progress.close(leave=False)
             print("\nStopping processing on user request.", end="\n\n")
             successful = False
         except Exception:
             # Handle all other exceptions.
+            progress.close()
             print("\nAn unexpected error occurred during compilation:", end="\n\n")
             traceback.print_exc()
             print("\nStopping processing.", end="\n\n")
@@ -765,7 +824,7 @@ class Compiler:
                 print(f"No scripts include {script.name}.")
                 return
             print(
-                f"{len(to_compile)} script(s) include {script.name}.",
+                f"{len(to_compile)} derived script(s) will be compiled.",
                 end="\n\n",
             )
             self.compile(
@@ -774,6 +833,7 @@ class Compiler:
             )
         else:
             # This is a normal script, so compile it directly.
+            print(f"\nCompiling: {script.name}")
             self.compile(
                 scripts=script,
                 new_hash_index=HashIndex.apply({script}),
@@ -794,6 +854,7 @@ class Compiler:
         # Clear old output files, including the hash index.
         self.clear_output_folders()
         # Batch compile all script files. If successful, update the hash index with the current file hashes.
+        print(f"\nAll {len(scripts)} script(s) will be compiled.", end="\n\n")
         self.compile(
             scripts=scripts, new_hash_index=HashIndex.apply_all(self.script_index)
         )
